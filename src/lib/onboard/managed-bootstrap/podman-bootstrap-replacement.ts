@@ -117,6 +117,11 @@ export interface StopExactPodmanBootstrapOriginalInput extends PodmanBootstrapRe
   readonly heldWorkload: PodmanHeldWorkloadObservation;
 }
 
+export interface PublishExactPodmanBootstrapReplacementInput extends PodmanBootstrapReplacementAuthority {
+  readonly prepared: PodmanBootstrapPreparedReplacement;
+  readonly heldWorkload: PodmanHeldWorkloadObservation;
+}
+
 export interface RollbackPodmanBootstrapBeforeCommitInput extends PodmanBootstrapReplacementAuthority {
   readonly bootstrapIdentity: string;
   readonly heldWorkload: PodmanHeldWorkloadObservation;
@@ -158,6 +163,7 @@ interface NormalizedReplacementPlan extends PodmanBootstrapReplacementPlan {
 interface ExactContainerExpectation {
   readonly runtimeId: string;
   readonly name: string;
+  readonly allowedNames?: readonly string[];
   readonly imageContentId: string;
   readonly labels: Readonly<Record<string, string>>;
   readonly running?: boolean;
@@ -755,7 +761,7 @@ function inspectExactContainer(
       : null;
   if (
     actualRuntimeId !== runtimeId ||
-    name !== expected.name ||
+    !(expected.allowedNames ?? [expected.name]).includes(name) ||
     actualImageContentId !== expected.imageContentId ||
     (expected.running !== undefined && state.Running !== expected.running) ||
     !containsExactEntries(labels, exactStringMap(expected.labels, "Expected Podman labels"))
@@ -967,13 +973,18 @@ function replacementExpectationFromJournal(
   held: PodmanHeldWorkloadObservation,
   runtimeId: string,
   stateVolume: ExactStateVolumeObservation,
+  options: {
+    readonly allowedNames?: readonly string[];
+    readonly expectedRunning?: boolean | null;
+  } = {},
 ): ExactContainerExpectation {
   return {
     runtimeId,
     name: journal.replacementStagingName,
+    ...(options.allowedNames ? { allowedNames: options.allowedNames } : {}),
     imageContentId: journal.replacementImageContentId,
     labels: replacementLabels(canonicalLabels(held)),
-    running: false,
+    running: options.expectedRunning === null ? undefined : (options.expectedRunning ?? false),
     stateVolume,
   };
 }
@@ -1093,15 +1104,7 @@ export function stopExactPodmanBootstrapOriginal(
     "replacement-created",
   ]);
   assertJournalAuthority(input, journal);
-  if (
-    input.prepared.originalRuntimeId !== journal.originalRuntimeId ||
-    input.prepared.replacementRuntimeId !== journal.replacementRuntimeId ||
-    input.prepared.replacementStateVolumeName !== journal.replacementStateVolumeName ||
-    input.prepared.replacementStateVolumeMountpoint !== journal.replacementStateVolumeMountpoint ||
-    input.prepared.replacementSpecFingerprint !== journal.replacementSpecFingerprint
-  ) {
-    failure("Podman bootstrap prepared replacement does not match the durable journal.");
-  }
+  assertPreparedMatchesJournal(input.prepared, journal);
   const original = inspectStableContainer(input, expectedOriginal(journal, input.heldWorkload));
   const stateVolume = inspectStableStateVolume(
     input,
@@ -1122,7 +1125,15 @@ export function stopExactPodmanBootstrapOriginal(
       ["container", "stop", journal.originalRuntimeId],
       STOP_TIMEOUT_MS,
     );
-    requireZero(stop, "Podman bootstrap original-container stop");
+    const wait = captureWhileWatcherHeld(
+      input,
+      ["container", "wait", journal.originalRuntimeId],
+      STOP_TIMEOUT_MS,
+    );
+    if (stop.status !== 0 && wait.status !== 0) {
+      requireZero(stop, "Podman bootstrap original-container stop");
+    }
+    requireZero(wait, "Podman bootstrap original-container exit wait");
   }
   inspectStableContainer(input, expectedOriginal(journal, input.heldWorkload, false));
   const remove = captureWhileWatcherHeld(input, ["container", "rm", journal.originalRuntimeId]);
@@ -1141,6 +1152,81 @@ export function stopExactPodmanBootstrapOriginal(
   );
   const stopped = input.journalStore.recordOriginalStopped(journal.bootstrapIdentity);
   return Object.freeze({ ...input.prepared, journal: stopped });
+}
+
+function assertPreparedMatchesJournal(
+  prepared: PodmanBootstrapPreparedReplacement,
+  journal: PodmanBootstrapJournal,
+): void {
+  if (
+    prepared.bootstrapIdentity !== journal.bootstrapIdentity ||
+    prepared.originalRuntimeId !== journal.originalRuntimeId ||
+    prepared.replacementRuntimeId !== journal.replacementRuntimeId ||
+    prepared.replacementStagingName !== journal.replacementStagingName ||
+    prepared.replacementStateVolumeName !== journal.replacementStateVolumeName ||
+    prepared.replacementStateVolumeMountpoint !== journal.replacementStateVolumeMountpoint ||
+    prepared.replacementImageContentId !== journal.replacementImageContentId ||
+    prepared.replacementSpecFingerprint !== journal.replacementSpecFingerprint
+  ) {
+    failure("Podman bootstrap prepared replacement does not match the durable journal.");
+  }
+}
+
+/** Publish the exact replacement under OpenShell's authoritative container name. */
+export function publishExactPodmanBootstrapReplacement(
+  input: PublishExactPodmanBootstrapReplacementInput,
+): void {
+  assertAuthority(input);
+  input.watcherLease.assertStillStopped();
+  const journal = requireJournalPhase(input.journalStore.load(input.prepared.bootstrapIdentity), [
+    "original-stopped",
+  ]);
+  assertJournalAuthority(input, journal);
+  assertPreparedMatchesJournal(input.prepared, journal);
+  if (containerExists(input, journal.originalRuntimeId)) {
+    failure("Podman bootstrap original reappeared before replacement publication.");
+  }
+  const stateVolume = inspectStableStateVolume(
+    input,
+    stateVolumeExpectationFromJournal(journal, input.heldWorkload),
+  );
+  const allowedNames = [journal.replacementStagingName, journal.originalContainerName] as const;
+  const replacement = inspectStableContainer(
+    input,
+    replacementExpectationFromJournal(
+      journal,
+      input.heldWorkload,
+      input.prepared.replacementRuntimeId,
+      stateVolume,
+      { allowedNames, expectedRunning: true },
+    ),
+  );
+  if (replacement.name === journal.replacementStagingName) {
+    const rename = captureWhileWatcherHeld(input, [
+      "container",
+      "rename",
+      journal.replacementRuntimeId as string,
+      journal.originalContainerName,
+    ]);
+    try {
+      inspectStableContainer(
+        input,
+        replacementExpectationFromJournal(
+          journal,
+          input.heldWorkload,
+          input.prepared.replacementRuntimeId,
+          stateVolume,
+          { allowedNames: [journal.originalContainerName], expectedRunning: true },
+        ),
+      );
+    } catch (error) {
+      if (rename.status !== 0) {
+        requireZero(rename, "Podman bootstrap replacement publication rename");
+      }
+      throw error;
+    }
+  }
+  input.watcherLease.assertStillStopped();
 }
 
 export function rollbackPodmanBootstrapBeforeCommit(
@@ -1187,18 +1273,46 @@ export function rollbackPodmanBootstrapBeforeCommit(
     if (!stateVolume) {
       failure("Podman bootstrap replacement lost its exact managed state volume.");
     }
-    inspectStableContainer(
-      input,
-      replacementExpectationFromJournal(
-        journal,
-        input.heldWorkload,
-        replacementRuntimeId,
-        stateVolume,
-      ),
+    const replacementExpectation = replacementExpectationFromJournal(
+      journal,
+      input.heldWorkload,
+      replacementRuntimeId,
+      stateVolume,
+      {
+        allowedNames: [journal.replacementStagingName, journal.originalContainerName],
+        expectedRunning: null,
+      },
     );
+    const replacement = inspectStableContainer(input, replacementExpectation);
+    if (replacement.running) {
+      const stop = captureWhileWatcherHeld(
+        input,
+        ["container", "stop", replacementRuntimeId],
+        STOP_TIMEOUT_MS,
+      );
+      const wait = captureWhileWatcherHeld(
+        input,
+        ["container", "wait", replacementRuntimeId],
+        STOP_TIMEOUT_MS,
+      );
+      try {
+        inspectStableContainer(input, {
+          ...replacementExpectation,
+          running: false,
+        });
+      } catch (error) {
+        if (stop.status !== 0) {
+          requireZero(stop, "Podman bootstrap replacement rollback stop");
+        }
+        if (wait.status !== 0) {
+          requireZero(wait, "Podman bootstrap replacement rollback exit wait");
+        }
+        throw error;
+      }
+    }
     const remove = captureWhileWatcherHeld(input, ["container", "rm", replacementRuntimeId]);
-    requireZero(remove, "Podman bootstrap replacement rollback removal");
     if (containerExists(input, replacementRuntimeId)) {
+      requireZero(remove, "Podman bootstrap replacement rollback removal");
       failure("Podman bootstrap replacement remained after exact rollback removal.");
     }
     replacementRemoved = true;
