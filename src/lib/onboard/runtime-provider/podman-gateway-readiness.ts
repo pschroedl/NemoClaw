@@ -108,9 +108,12 @@ function classifyEndpointBinding(
   endpoints: readonly (string | null)[],
   expectedEndpoint: string,
 ): RuntimeProviderOwnedGatewayReadinessObservation["endpointBinding"] {
-  const expected = new URL(expectedEndpoint).origin;
+  const expected = new URL(expectedEndpoint);
+  const loopback = new URL(expectedEndpoint);
+  loopback.hostname = "127.0.0.1";
+  const acceptedOrigins = new Set([expected.origin, loopback.origin]);
   if (!endpoints.length) return "unknown";
-  return endpoints.every((endpoint) => endpoint !== null && endpoint === expected)
+  return endpoints.every((endpoint) => endpoint !== null && acceptedOrigins.has(endpoint))
     ? "match"
     : "mismatch";
 }

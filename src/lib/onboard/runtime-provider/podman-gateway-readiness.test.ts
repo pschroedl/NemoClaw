@@ -106,6 +106,20 @@ describe("native Podman gateway readiness", () => {
     });
   });
 
+  it("accepts host loopback for a proven native Podman gateway", () => {
+    const observation = observeNativePodmanGatewayReadiness(
+      {
+        ...input(),
+        managedGatewayEndpoints: ["https://" + "127.0.0.1:" + String(GATEWAY_PORT)],
+      },
+      readinessDeps(),
+    );
+
+    expect(observation.endpointBinding).toBe("match");
+    expect(observation.listenerScan.pids).toEqual([PID]);
+    expect(observation.versionCompatibility).toBe("compatible");
+  });
+
   it.each([
     ["another provider", { driver: "docker" }],
     ["another endpoint", { endpoint: "https://169.254.2.2:8990" }],
