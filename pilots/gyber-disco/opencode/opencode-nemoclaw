@@ -1,0 +1,16 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+
+state_dir=/sandbox/.opencode
+mkdir -p "$state_dir/config" "$state_dir/data" "$state_dir/cache" "$state_dir/state"
+if [ ! -e "$state_dir/opencode.json" ]; then
+  cp /usr/local/share/nemoclaw/opencode.json "$state_dir/opencode.json"
+fi
+export OPENCODE_CONFIG="$state_dir/opencode.json"
+export XDG_CONFIG_HOME="$state_dir/config"
+export XDG_DATA_HOME="$state_dir/data"
+export XDG_CACHE_HOME="$state_dir/cache"
+export XDG_STATE_HOME="$state_dir/state"
+export OPENCODE_DISABLE_MODELS_FETCH=1
+exec /usr/local/bin/opencode "$@"

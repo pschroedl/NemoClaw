@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Pilot / Gyber Disco Harness Images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: opencode
+            context: pilots/gyber-disco/opencode
+            image: nemoclaw-pilot-opencode
+          - name: inference-auth-proxy
+            context: pilots/gyber-disco/inference-auth-proxy
+            image: nemoclaw-inference-auth-proxy
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          platforms: linux/amd64
+          provenance: mode=max
+          sbom: true
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+      - name: Record immutable image
+        run: printf '%s@%s\n' 'ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}' '${{ steps.build.outputs.digest }}'
+
+  promote:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: openclaw
+            source: ghcr.io/nvidia/nemoclaw/openclaw-sandbox@sha256:959d1255717b54f724248eb282dbb049d3cd785d5aa4eddb0da2a03839ad6fca
+          - name: hermes
+            source: ghcr.io/nvidia/nemoclaw/hermes-sandbox@sha256:26899bd091f7ad2d58ab7cf9fad33f1fcd065c10eb54f9cf1461a24e1c21ed1a
+          - name: langchain-deepagents-code
+            source: ghcr.io/nvidia/nemoclaw/langchain-deepagents-code-sandbox@sha256:25634ef3d6f4e0e1aba30397c4a7ae56cc5f9d020fd5888318c24fcd073ffea9
+    steps:
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote pinned image
+        env:
+          SOURCE: ${{ matrix.source }}
+          TARGET: ghcr.io/${{ github.repository_owner }}/nemoclaw-pilot-${{ matrix.name }}:${{ github.sha }}
+        run: docker buildx imagetools create --tag "$TARGET" "$SOURCE"
+      - name: Verify promoted image
+        env:
+          TARGET: ghcr.io/${{ github.repository_owner }}/nemoclaw-pilot-${{ matrix.name }}:${{ github.sha }}
+        run: docker buildx imagetools inspect "$TARGET"
