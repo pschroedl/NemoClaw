@@ -2,6 +2,9 @@
 name: Pilot / Gyber Disco Harness Images
 
 on:
+  push:
+    branches:
+      - feat/gyber-disco-harness-pilots
   workflow_dispatch:
 
 permissions:
